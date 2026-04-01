@@ -1,9 +1,5 @@
 import streamlit as st
 from itertools import combinations
-import json
-import os
-
-FILE = "players.json"
 
 # -------------------------
 # Player
@@ -26,22 +22,10 @@ class Player:
         self.preferred = set()
         self.avoid = set()
 
-    def to_dict(self):
-        return {
-            "name": self.name,
-            "gender": self.gender,
-            "skill": self.skill
-        }
-
 # -------------------------
-# Load / Save
+# INIT
 # -------------------------
-def load_players():
-    if os.path.exists(FILE):
-        with open(FILE) as f:
-            data = json.load(f)
-            return [Player(d["name"], d["gender"], d["skill"]) for d in data]
-
+def init_players():
     return [
         Player("Jos", "M", 4),
         Player("Open", "F", 2),
@@ -52,15 +36,8 @@ def load_players():
         Player("Sendy", "M", 2),
     ]
 
-def save_players(players):
-    with open(FILE, "w") as f:
-        json.dump([p.to_dict() for p in players], f)
-
-# -------------------------
-# Init state
-# -------------------------
 if "players" not in st.session_state:
-    st.session_state.players = load_players()
+    st.session_state.players = init_players()
     st.session_state.current_tick = 1
     st.session_state.last_pairs = set()
     st.session_state.match_history = []
@@ -77,11 +54,11 @@ def team_skill(team):
 def pair_key(team):
     return tuple(sorted(p.name for p in team))
 
-def get_player(name):
-    return next((p for p in players if p.name == name), None)
+def format_team(team):
+    return " & ".join([p.name for p in team])
 
 # -------------------------
-# Match Logic
+# MATCH LOGIC (FIXED)
 # -------------------------
 def find_best_match():
     available = [p for p in players if not p.force_skip]
@@ -100,24 +77,30 @@ def find_best_match():
 
             score = 0
 
+            # fairness
             for p in group:
                 score += (p.matches_played - min_match) * 100
 
+            # balance
             score += abs(team_skill(teamA) - team_skill(teamB)) * 5
 
+            # avoid back-to-back
             for p in group:
                 if p.last_played_tick == st.session_state.current_tick - 1:
                     score += 50
 
+            # avoid repeating pairs
             if pair_key(teamA) in st.session_state.last_pairs:
-                score += 40
+                score += 100
             if pair_key(teamB) in st.session_state.last_pairs:
-                score += 40
+                score += 100
 
+            # priority enforcement
             for p in priority_players:
                 if p not in group:
                     score += 1000
 
+            # preferred / avoid
             for team in [teamA, teamB]:
                 for p in team:
                     for q in team:
@@ -133,7 +116,7 @@ def find_best_match():
     return best
 
 # -------------------------
-# Actions
+# ACTIONS
 # -------------------------
 def generate_match(court_id):
     match = find_best_match()
@@ -143,23 +126,23 @@ def generate_match(court_id):
 
     teamA, teamB, group = match
 
-    st.session_state.courts[court_id].append(
-        f"Match {st.session_state.current_tick}: "
-        f"{[p.name for p in teamA]} vs {[p.name for p in teamB]}"
-    )
+    text = f"Match {st.session_state.current_tick}: {format_team(teamA)} vs {format_team(teamB)}"
+
+    st.session_state.courts[court_id].append(text)
 
     st.session_state.match_history.append({
         "court": court_id,
         "teamA": teamA,
         "teamB": teamB,
         "players": group,
-        "result": None
+        "result": None,
+        "text": text
     })
 
     for p in group:
         p.matches_played += 1
         p.last_played_tick = st.session_state.current_tick
-        p.priority = False
+        p.priority = False  # one-time use
 
     st.session_state.last_pairs = {pair_key(teamA), pair_key(teamB)}
     st.session_state.current_tick += 1
@@ -181,7 +164,7 @@ def submit_result(court_id):
                 else:
                     p.losses += 1
 
-            # CLEAR INPUT
+            # clear scores
             st.session_state[f"a{court_id}"] = 0
             st.session_state[f"b{court_id}"] = 0
             return
@@ -191,6 +174,10 @@ def undo_last():
         return
 
     match = st.session_state.match_history.pop()
+
+    # remove from court UI
+    if match["text"] in st.session_state.courts[match["court"]]:
+        st.session_state.courts[match["court"]].remove(match["text"])
 
     for p in match["players"]:
         p.matches_played -= 1
@@ -211,56 +198,63 @@ def undo_last():
 # -------------------------
 st.title("🏸 Badminton Matcher PRO")
 
-# PLAYER MANAGEMENT
+# PLAYERS
 st.subheader("Players")
 
 for i, p in enumerate(players):
-    col1, col2, col3, col4 = st.columns([3,1,1,1])
+    cols = st.columns([3,1,1,1])
 
-    col1.write(f"{p.name} ({p.gender}) - {p.skill}")
+    label = f"{p.name} ({p.gender}) | Skill {p.skill} | Played {p.matches_played}"
 
-    if col2.button("Skip", key=f"s{i}"):
+    if p.force_skip:
+        label = "🔴 " + label
+    elif p.priority:
+        label = "🟡 " + label
+
+    cols[0].write(label)
+
+    if cols[1].button("Skip", key=f"s{i}"):
         p.force_skip = not p.force_skip
-        if p.force_skip: p.priority = False
+        if p.force_skip:
+            p.priority = False
 
-    if col3.button("Priority", key=f"p{i}"):
-        p.priority = not p.priority
-        if p.priority: p.force_skip = False
+    if cols[2].button("Priority", key=f"p{i}"):
+        p.priority = True
+        p.force_skip = False
 
-    if col4.button("Delete", key=f"d{i}"):
+    if cols[3].button("Delete", key=f"d{i}"):
         players.pop(i)
-        save_players(players)
         st.rerun()
+
+# EDIT PLAYER
+st.subheader("Edit Player")
+
+names = [p.name for p in players]
+selected = st.selectbox("Select Player", names)
+
+p = next(x for x in players if x.name == selected)
+
+new_name = st.text_input("Name", value=p.name)
+new_gender = st.selectbox("Gender", ["M","F"], index=0 if p.gender=="M" else 1)
+new_skill = st.slider("Skill", 1, 5, p.skill)
+
+if st.button("Update Player"):
+    p.name = new_name
+    p.gender = new_gender
+    p.skill = new_skill
+    st.rerun()
 
 # ADD PLAYER
 st.subheader("Add Player")
-name = st.text_input("Name")
-gender = st.selectbox("Gender", ["M", "F"])
-skill = st.slider("Skill", 1, 5, 3)
 
-if st.button("Add"):
+name = st.text_input("New Name")
+gender = st.selectbox("New Gender", ["M","F"])
+skill = st.slider("New Skill", 1, 5, 3)
+
+if st.button("Add Player"):
     if name:
         players.append(Player(name, gender, skill))
-        save_players(players)
         st.rerun()
-
-# PREFER / AVOID
-st.subheader("Preferences")
-
-p1 = st.selectbox("Player", [p.name for p in players])
-p2 = st.selectbox("Target", [p.name for p in players])
-
-colA, colB = st.columns(2)
-
-if colA.button("Add Preferred"):
-    a, b = get_player(p1), get_player(p2)
-    a.preferred.add(b.name)
-    b.preferred.add(a.name)
-
-if colB.button("Add Avoid"):
-    a, b = get_player(p1), get_player(p2)
-    a.avoid.add(b.name)
-    b.avoid.add(a.name)
 
 # COURTS
 st.subheader("Courts")
@@ -275,19 +269,20 @@ for i in range(2):
         st.write(m)
 
     col1, col2 = st.columns(2)
-    col1.number_input("A", key=f"a{i}")
-    col2.number_input("B", key=f"b{i}")
+    col1.number_input("A", step=1, format="%d", key=f"a{i}")
+    col2.number_input("B", step=1, format="%d", key=f"b{i}")
 
     if st.button("Submit Result", key=f"r{i}"):
         submit_result(i)
 
 # LEADERBOARD
 st.subheader("Leaderboard")
+
 for p in sorted(players, key=lambda x: x.wins, reverse=True):
     total = p.wins + p.losses
     rate = (p.wins / total * 100) if total else 0
     st.write(f"{p.name}: {p.wins}W {p.losses}L ({rate:.1f}%)")
 
 # UNDO
-if st.button("Undo"):
+if st.button("Undo Last Match"):
     undo_last()
